@@ -128,27 +128,42 @@ def run_ml(_prices, stock_names, rf_rate):
     n = len(stock_names)
 
     def perf(w, mr):
-        r = np.dot(w, mr); v = np.sqrt(w.T @ cov @ w); return r, v, (r-rf_rate)/v
+        r = np.dot(w, mr); v = np.sqrt(w.T @ cov @ w); return r, v, (r-rf_rate)/v if v > 0 else 0
 
     preds = {}
     for stock in stock_names:
-        df = pd.DataFrame({'Return': monthly[stock]})
-        df['Mom1'] = df['Return'].shift(1); df['Mom3'] = df['Return'].rolling(3).mean().shift(1)
-        df['Mom6'] = df['Return'].rolling(6).mean().shift(1)
-        df['Vol3'] = df['Return'].rolling(3).std().shift(1); df['Vol6'] = df['Return'].rolling(6).std().shift(1)
-        df['Dev'] = df['Return'].shift(1) - df['Return'].rolling(12).mean().shift(1)
-        df.dropna(inplace=True)
-        fc = ['Mom1','Mom3','Mom6','Vol3','Vol6','Dev']
-        X, y = df[fc].values, df['Return'].values
-        split = int(len(X)*0.7)
-        sc = RobustScaler(); Xtr = sc.fit_transform(X[:split]); Xte = sc.transform(X[split:])
-        m = GradientBoostingRegressor(n_estimators=100, max_depth=3, learning_rate=0.1, random_state=42)
-        m.fit(Xtr, y[:split])
-        yp = m.predict(Xte)
-        preds[stock] = {'dir_acc': np.mean(np.sign(y[split:])==np.sign(yp)), 'last_pred': yp[-1]}
+        try:
+            df = pd.DataFrame({'Return': monthly[stock]})
+            df['Mom1'] = df['Return'].shift(1)
+            df['Mom3'] = df['Return'].rolling(3).mean().shift(1)
+            df['Mom6'] = df['Return'].rolling(6).mean().shift(1)
+            df['Vol3'] = df['Return'].rolling(3).std().shift(1)
+            df['Vol6'] = df['Return'].rolling(6).std().shift(1)
+            df['Dev'] = df['Return'].shift(1) - df['Return'].rolling(12).mean().shift(1)
+            df.dropna(inplace=True)
+
+            if len(df) < 15:  # Need minimum data for meaningful train/test
+                preds[stock] = {'dir_acc': 0.5, 'last_pred': monthly[stock].mean()}
+                continue
+
+            fc = ['Mom1','Mom3','Mom6','Vol3','Vol6','Dev']
+            X, y = df[fc].values, df['Return'].values
+            split = max(int(len(X)*0.7), 5)  # At least 5 training samples
+            if split >= len(X) - 1:
+                split = len(X) - 2
+
+            sc = RobustScaler()
+            Xtr = sc.fit_transform(X[:split])
+            Xte = sc.transform(X[split:])
+            m = GradientBoostingRegressor(n_estimators=100, max_depth=3, learning_rate=0.1, random_state=42)
+            m.fit(Xtr, y[:split])
+            yp = m.predict(Xte)
+            preds[stock] = {'dir_acc': np.mean(np.sign(y[split:])==np.sign(yp)), 'last_pred': yp[-1]}
+        except Exception:
+            preds[stock] = {'dir_acc': 0.5, 'last_pred': monthly[stock].mean() if stock in monthly.columns else 0}
 
     ml_er = np.array([preds[s]['last_pred']*12 for s in stock_names])
-    def neg_sr_ml(w): r=np.dot(w,ml_er); v=np.sqrt(w.T@cov@w); return -(r-rf_rate)/v
+    def neg_sr_ml(w): r=np.dot(w,ml_er); v=np.sqrt(w.T@cov@w); return -(r-rf_rate)/v if v > 0 else 0
     cons = {'type':'eq','fun':lambda w:np.sum(w)-1}
     bnds = tuple((0,1) for _ in range(n))
     r = minimize(neg_sr_ml, np.array([1/n]*n), method='SLSQP', bounds=bnds, constraints=cons)
